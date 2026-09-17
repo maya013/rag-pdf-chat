@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+
+.env
+.env.*
+
+rag-frontend/node_modules/
+rag-frontend/.next/
+rag-frontend/out/
