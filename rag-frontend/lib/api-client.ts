@@ -94,6 +94,9 @@ export async function signOut(): Promise<void> {
   await readJson(await window.fetch("/api/auth/logout", {
     method: "POST", credentials: "same-origin", cache: "no-store",
   }));
+  // A successful logout starts an empty guest workspace, rather than reopening
+  // a previous guest's documents on this browser. Account history stays saved.
+  localStorage.removeItem(SESSION_KEY);
   resetAuthCache();
   authKnown = true;
   localStorage.setItem(AUTH_STORAGE_KEY, crypto.randomUUID());

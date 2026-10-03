@@ -30,7 +30,6 @@ MAX_PDF_SIZE = 20 * 1024 * 1024
 EMBEDDING_DIMENSIONS = 768
 GENERATION_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
-DEFAULT_PDF_PATH = Path(__file__).with_name("document.pdf")
 
 
 def new_id() -> str:
@@ -572,16 +571,7 @@ def health() -> dict:
 
 @app.get("/")
 def home(owner: Owner, document_id: str | None = None, conversation_id: str | None = None) -> dict:
-    with Session(engine) as db:
-        document = db.exec(
-            select(Document).where(Document.owner_hash == owner)
-            .order_by(Document.created_at.desc(), Document.id.desc())
-        ).first()
-    if document is None and not document_id and DEFAULT_PDF_PATH.exists():
-        # Optional Lab/demo default: each browser gets its own persisted copy.
-        # PDF extraction and Gemini calls run in FastAPI's worker thread.
-        if DEFAULT_PDF_PATH.stat().st_size <= MAX_PDF_SIZE:
-            save_document(DEFAULT_PDF_PATH.read_bytes(), DEFAULT_PDF_PATH.name, owner)
+    # Restore only this owner's saved uploads. Bundled PDFs are never imported.
     with Session(engine) as db:
         try:
             document = find_document(db, owner, document_id)
