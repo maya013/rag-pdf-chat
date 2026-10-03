@@ -247,7 +247,7 @@ export default function Home() {
               <span className={`h-2 w-2 rounded-full ${backendReady ? "bg-[#4a9b67]" : "bg-[#d36b58]"}`} />
               {checkingBackend ? "Connecting..." : backendReady ? "Connected" : "Offline"}
             </span>
-            {!user && <button type="button" disabled={busy} onClick={() => showAuth("login")} className="rounded-xl bg-[#315e50] px-4 py-2 text-sm font-medium text-white disabled:opacity-50">Log in</button>}
+            {!user && <button type="button" disabled={busy} onClick={() => showAuth("login")} className="cursor-default rounded-xl bg-[#315e50] px-4 py-2 text-sm font-medium text-white transition-[transform,background-color,box-shadow] duration-200 ease-out motion-safe:enabled:hover:-translate-y-0.5 motion-safe:enabled:hover:scale-[1.02] enabled:hover:bg-[#254c40] enabled:hover:shadow-[0_8px_20px_rgba(49,94,80,0.2)] motion-safe:enabled:active:translate-y-0 motion-safe:enabled:active:scale-[0.98] enabled:active:bg-[#203f34] enabled:active:shadow-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#315e50] motion-reduce:transition-none disabled:opacity-50">Log in</button>}
           </div>
         </header>
         <div className="flex items-start gap-6 pt-6">
@@ -305,7 +305,30 @@ export default function Home() {
             <div className="sticky bottom-4 mx-auto w-full max-w-3xl">
               <form onSubmit={(event) => { event.preventDefault(); void askQuestion(question); }} className="flex items-center gap-2 rounded-[26px] border border-[#d5dfd9] bg-white/95 p-3 shadow-[0_18px_50px_rgba(57,78,69,0.14)] backdrop-blur-xl">
                 <input ref={fileInputRef} type="file" accept=".pdf,application/pdf" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadPdf(file); }} />
-                <button type="button" title="Upload a PDF" aria-label="Upload a PDF" disabled={busy || !backendReady} onClick={() => fileInputRef.current?.click()} className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#f5d8c8] text-3xl text-[#a85640] disabled:opacity-40">{uploading ? "…" : "+"}</button>
+                <button
+                  type="button"
+                  title="Upload a PDF"
+                  aria-label="Upload a PDF"
+                  disabled={busy || !backendReady}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="group flex h-12 w-12 shrink-0 cursor-default items-center justify-center rounded-2xl bg-[#f5d8c8] text-[#a85640] transition-[transform,background-color,box-shadow] duration-200 ease-out motion-safe:enabled:hover:-translate-y-0.5 motion-safe:enabled:hover:scale-[1.04] enabled:hover:bg-[#efc5b2] enabled:hover:shadow-[0_6px_16px_rgba(168,86,64,0.18)] motion-safe:enabled:active:translate-y-0 motion-safe:enabled:active:scale-[0.96] enabled:active:bg-[#eab7a1] enabled:active:shadow-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#a85640] motion-reduce:transition-none disabled:opacity-40"
+                >
+                  {uploading ? <span aria-hidden="true" className="text-3xl">…</span> : (
+                    <svg
+                      aria-hidden="true"
+                      width="24"
+                      height="24"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      className={`transition-transform duration-300 ease-out motion-reduce:transition-none ${!busy && backendReady ? "motion-safe:group-hover:rotate-90" : ""}`}
+                    >
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  )}
+                </button>
                 <input type="text" aria-label="Question about your PDF" value={question} disabled={busy || !backendReady || !activeDocument} onChange={(event) => setQuestion(event.target.value)} placeholder={uploading ? "Reading your PDF..." : !activeDocument ? "Upload a PDF to begin..." : "Ask a question about your PDF..."} className="min-w-0 flex-1 bg-transparent px-2 py-3 outline-none placeholder:text-[#99aaa3] disabled:cursor-not-allowed" />
                 <button type="submit" disabled={busy || !question.trim() || !backendReady || !activeDocument} className="rounded-2xl bg-[#315e50] px-4 py-3 font-semibold text-white disabled:bg-[#cbd5d0] disabled:text-[#82928c]">{loading ? "Thinking..." : "Ask"}</button>
               </form>
