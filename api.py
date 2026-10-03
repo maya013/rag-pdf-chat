@@ -3,19 +3,25 @@ import logging
 import math
 import os
 import re
+import secrets
+from threading import Semaphore
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
 import pymupdf
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field as RequestField
-from sqlalchemy import JSON, Column, DateTime, event
+from pydantic import BaseModel, EmailStr, Field as RequestField
+from pwdlib import PasswordHash
+from sqlalchemy import JSON, Column, DateTime, case, delete, event, func, update
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 from starlette.concurrency import run_in_threadpool
 
@@ -141,19 +147,283 @@ app.add_middleware(
 )
 
 
+class Account(SQLModel, table=True):
+    __tablename__ = "rag_accounts"
+    id: str = Field(default_factory=new_id, primary_key=True)
+    email: str = Field(unique=True, index=True)
+    password_hash: str
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class LoginSession(SQLModel, table=True):
+    __tablename__ = "rag_login_sessions"
+    token_hash: str = Field(primary_key=True)
+    account_id: str = Field(foreign_key="rag_accounts.id", index=True)
+    expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
+class AccessToken(SQLModel, table=True):
+    __tablename__ = "rag_access_tokens"
+    token_hash: str = Field(primary_key=True)
+    session_hash: str = Field(foreign_key="rag_login_sessions.token_hash", index=True)
+    expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
+class AuthLimit(SQLModel, table=True):
+    __tablename__ = "rag_auth_limits"
+    key: str = Field(primary_key=True)
+    attempts: int = 0
+    window_start: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
+password_hasher = PasswordHash.recommended()
+password_slots = Semaphore(2)
+# An unknown email still performs the same expensive password verification.
+DUMMY_PASSWORD_HASH = password_hasher.hash(secrets.token_urlsafe(32))
+SESSION_SECONDS = 14 * 24 * 60 * 60
+ACCESS_SECONDS = 15 * 60
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def account_owner(account_id: str) -> str:
+    return hash_token("account:" + account_id)
+
+
+def guest_owner(session_id: str | None) -> str:
+    if not session_id or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", session_id):
+        raise HTTPException(status_code=400, detail="A valid browser session is required.")
+    return hash_token(session_id)
+
+
+def bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Please log in again.")
+    token = authorization[7:]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,128}", token):
+        raise HTTPException(status_code=401, detail="Please log in again.")
+    return token
+
+
+def authenticated_session(db: Session, authorization: str | None) -> tuple[Account, LoginSession]:
+    token = bearer_token(authorization)
+    session = db.get(LoginSession, hash_token(token))
+    if session is None or as_utc(session.expires_at) <= utc_now():
+        raise HTTPException(status_code=401, detail="Your login has expired. Please log in again.")
+    account = db.get(Account, session.account_id)
+    if account is None:
+        raise HTTPException(status_code=401, detail="Please log in again.")
+    return account, session
+
+
 def get_owner_hash(
     session_id: Annotated[str | None, Header(alias="X-Session-ID")] = None,
+    authorization: Annotated[str | None, Header()] = None,
 ) -> str:
-    # This is an anonymous browser access token, not an account login.
-    if not session_id or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", session_id):
-        raise HTTPException(
-            status_code=400,
-            detail="A browser session is required. Add the supplied api-client.ts helper to your frontend.",
-        )
-    return hashlib.sha256(session_id.encode()).hexdigest()
+    if authorization:
+        token = bearer_token(authorization)
+        with Session(engine) as db:
+            access = db.get(AccessToken, hash_token(token))
+            if access is None or as_utc(access.expires_at) <= utc_now():
+                raise HTTPException(status_code=401, detail="Please log in again.")
+            session = db.get(LoginSession, access.session_hash)
+            if session is None or as_utc(session.expires_at) <= utc_now():
+                raise HTTPException(status_code=401, detail="Please log in again.")
+            return account_owner(session.account_id)
+    return guest_owner(session_id)
 
 
 Owner = Annotated[str, Depends(get_owner_hash)]
+
+
+class Credentials(BaseModel):
+    email: EmailStr
+    password: str = RequestField(min_length=1, max_length=128)
+    import_guest: bool = False
+
+
+def public_account(account: Account) -> dict:
+    return {"id": account.id, "email": account.email}
+
+
+def throttle_auth(request: Request, email: str, signup: bool = False) -> None:
+    # Atomic database counters work across server restarts and multiple workers.
+    now = utc_now()
+    start = now - timedelta(minutes=15)
+    peer = request.client.host if request.client else "unknown"
+    keys = [("email:" + email, 10), ("ip:" + peer, 40)]
+    if signup:
+        keys.append(("signup-ip:" + peer, 10))
+    rejected = False
+    with Session(engine) as db:
+        db.exec(delete(AuthLimit).where(AuthLimit.window_start < now - timedelta(days=1)))
+        for label, maximum in keys:
+            key = hash_token(label)
+            insert = sqlite_insert if engine.dialect.name == "sqlite" else postgres_insert
+            reset = AuthLimit.window_start <= start
+            statement = insert(AuthLimit).values(key=key, attempts=1, window_start=now)
+            statement = statement.on_conflict_do_update(
+                index_elements=["key"],
+                set_={"attempts": case((reset, 1), else_=AuthLimit.attempts + 1),
+                      "window_start": case((reset, now), else_=AuthLimit.window_start)},
+            ).returning(AuthLimit.attempts)
+            attempts = db.exec(statement).one()[0]
+            rejected = rejected or attempts > maximum
+        db.commit()
+    if rejected:
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again in 15 minutes.",
+                            headers={"Retry-After": "900"})
+
+
+def import_browser_documents(db: Session, account: Account, session_id: str | None) -> int:
+    # Knowledge of the existing random browser token is required to claim its data.
+    owner = guest_owner(session_id)
+    result = db.exec(update(Document).where(Document.owner_hash == owner)
+                     .values(owner_hash=account_owner(account.id)))
+    return result.rowcount
+
+
+def create_login(db: Session, account: Account, imported: int) -> dict:
+    now = utc_now()
+    expired = select(LoginSession.token_hash).where(LoginSession.expires_at <= now)
+    db.exec(delete(AccessToken).where(
+        (AccessToken.expires_at <= now) | AccessToken.session_hash.in_(expired)
+    ))
+    db.exec(delete(LoginSession).where(LoginSession.expires_at <= now))
+    token = "s_" + secrets.token_urlsafe(32)
+    db.add(LoginSession(token_hash=hash_token(token), account_id=account.id,
+                        expires_at=now + timedelta(seconds=SESSION_SECONDS)))
+    return {"user": public_account(account), "session_token": token,
+            "expires_in": SESSION_SECONDS, "imported_documents": imported}
+
+
+@app.post("/auth/signup", status_code=201)
+def signup(
+    credentials: Credentials, request: Request,
+    session_id: Annotated[str | None, Header(alias="X-Session-ID")] = None,
+) -> dict:
+    if len(credentials.password) < 12:
+        raise HTTPException(status_code=400, detail="Use a password with at least 12 characters.")
+    email = str(credentials.email).strip().casefold()
+    throttle_auth(request, email, signup=True)
+    with password_slots:
+        hashed = password_hasher.hash(credentials.password)
+    with Session(engine) as db:
+        account = Account(email=email, password_hash=hashed)
+        db.add(account)
+        try:
+            db.flush()
+            imported = import_browser_documents(db, account, session_id) if credentials.import_guest else 0
+            result = create_login(db, account, imported)
+            db.commit()
+        except IntegrityError as error:
+            db.rollback()
+            raise HTTPException(status_code=409,
+                                detail="Could not create this account. Try logging in instead.") from error
+    return result
+
+
+@app.post("/auth/login")
+def login(
+    credentials: Credentials, request: Request,
+    session_id: Annotated[str | None, Header(alias="X-Session-ID")] = None,
+) -> dict:
+    email = str(credentials.email).strip().casefold()
+    throttle_auth(request, email)
+    with Session(engine) as db:
+        account = db.exec(select(Account).where(Account.email == email)).first()
+        with password_slots:
+            valid = password_hasher.verify(
+                credentials.password, account.password_hash if account else DUMMY_PASSWORD_HASH
+            )
+        if not account or not valid:
+            raise HTTPException(status_code=401, detail="Email or password is incorrect.")
+        imported = import_browser_documents(db, account, session_id) if credentials.import_guest else 0
+        result = create_login(db, account, imported)
+        db.commit()
+        return result
+
+
+@app.get("/auth/me")
+def current_account(authorization: Annotated[str | None, Header()] = None) -> dict:
+    with Session(engine) as db:
+        account, _session = authenticated_session(db, authorization)
+        return {"user": public_account(account)}
+
+
+@app.get("/auth/token")
+def issue_access_token(authorization: Annotated[str | None, Header()] = None) -> dict:
+    with Session(engine) as db:
+        _account, session = authenticated_session(db, authorization)
+        now = utc_now()
+        db.exec(delete(AccessToken).where(AccessToken.expires_at <= now))
+        count = db.exec(select(func.count()).select_from(AccessToken)
+                        .where(AccessToken.session_hash == session.token_hash)).one()
+        if count >= 60:
+            raise HTTPException(status_code=429, detail="Too many active requests. Try again shortly.")
+        token = "a_" + secrets.token_urlsafe(32)
+        expires_at = min(now + timedelta(seconds=ACCESS_SECONDS), as_utc(session.expires_at))
+        db.add(AccessToken(token_hash=hash_token(token), session_hash=session.token_hash,
+                           expires_at=expires_at))
+        db.commit()
+        return {"access_token": token, "expires_in": max(1, int((expires_at - now).total_seconds()))}
+
+
+@app.post("/auth/logout")
+def logout(authorization: Annotated[str | None, Header()] = None) -> dict:
+    if authorization:
+        token = bearer_token(authorization)
+        token_hash = hash_token(token)
+        with Session(engine) as db:
+            db.exec(delete(AccessToken).where(AccessToken.session_hash == token_hash))
+            db.exec(delete(LoginSession).where(LoginSession.token_hash == token_hash))
+            db.commit()
+    return {"message": "Logged out."}
+
+
+@app.get("/history")
+def history(owner: Owner) -> dict:
+    with Session(engine) as db:
+        documents = db.exec(select(Document).where(Document.owner_hash == owner)
+                             .order_by(Document.created_at.desc(), Document.id.desc())).all()
+        document_ids = [item.id for item in documents]
+        if not document_ids:
+            return {"documents": []}
+        conversations = db.exec(select(Conversation).where(Conversation.document_id.in_(document_ids))
+                                 .order_by(Conversation.created_at.desc(), Conversation.id.desc())).all()
+        ids = [item.id for item in conversations]
+        stats = {row[0]: row[1:] for row in db.exec(
+            select(Message.conversation_id, func.count(Message.id), func.max(Message.created_at))
+            .where(Message.conversation_id.in_(ids)).group_by(Message.conversation_id)
+        ).all()}
+        first_ids = select(func.min(Message.id)).where(
+            Message.conversation_id.in_(ids), Message.role == "user"
+        ).group_by(Message.conversation_id)
+        titles = {message.conversation_id: message.text[:90] for message in db.exec(
+            select(Message).where(Message.id.in_(first_ids))
+        ).all()}
+        grouped: dict[str, list[dict]] = {}
+        for conversation in conversations:
+            count, latest = stats.get(conversation.id, (0, conversation.created_at))
+            grouped.setdefault(conversation.document_id, []).append({
+                "id": conversation.id, "title": titles.get(conversation.id, "New conversation"),
+                "message_count": count, "created_at": conversation.created_at.isoformat(),
+                "updated_at": (latest or conversation.created_at).isoformat(),
+            })
+        result = [{"id": document.id, "filename": document.filename, "pages": document.pages,
+                   "chunks": document.chunk_count, "created_at": document.created_at.isoformat(),
+                   "conversations": sorted(grouped.get(document.id, []),
+                                           key=lambda item: item["updated_at"], reverse=True)}
+                  for document in documents]
+        return {"documents": result}
 
 
 class QuestionRequest(BaseModel):
@@ -448,6 +718,8 @@ def ask_question(request: QuestionRequest, owner: Owner) -> dict:
 
     sources = [{"page": chunk.page, "score": round(score, 4)} for chunk, score in ranked]
     with Session(engine) as db:
+        # Recheck access if browser history was moved into an account during generation.
+        find_document(db, owner, document_id)
         # Save both messages atomically and in order after generation succeeds.
         user_message = Message(conversation_id=conversation_id, role="user", text=question)
         db.add(user_message)
