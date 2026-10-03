@@ -230,6 +230,26 @@ export default function Home() {
       .toLowerCase().includes(historySearch.toLowerCase()),
   );
 
+  const connectionClass = `rag-status-pill inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs ${checkingBackend ? "border-[#eadcc2] bg-[#fff6e7] text-[#8b7043]" : backendReady ? "rag-status-ready border-[#bedfc9] bg-[#e5f4ea] text-[#326348]" : "border-[#efc5bc] bg-[#fff0ec] text-[#a34e40]"}`;
+  const connectionContent = (
+    <>
+      <span aria-hidden="true" className={`rag-book-icon ${checkingBackend ? "rag-book-waking" : ""}`}>
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+          <g className="rag-book-left">
+            <path d="M12 6C9 4 5.5 4 2 5v14c3.5-1 7-1 10 1V6Z" fill="currentColor" fillOpacity="0.08" />
+            <path d="M5 9c1.5-.3 3-.1 4 .4M5 12c1.5-.3 3-.1 4 .4" />
+          </g>
+          <g className="rag-book-right">
+            <path d="M12 6c3-2 6.5-2 10-1v14c-3.5-1-7-1-10 1V6Z" fill="currentColor" fillOpacity="0.08" />
+            <path d="M15 9.4c1-.5 2.5-.7 4-.4M15 12.4c1-.5 2.5-.7 4-.4" />
+          </g>
+        </svg>
+      </span>
+      <span>{checkingBackend ? "Waking up…" : backendReady ? "Ready to read" : "Let’s reconnect"}</span>
+      {!checkingBackend && backendReady && <span aria-hidden="true" className="rag-ready-sparkle">✦</span>}
+    </>
+  );
+
   return (
     <main className="relative min-h-screen bg-[#f7f6f1] text-[#263a33]">
       <div className="pointer-events-none fixed -left-52 -top-52 h-[500px] w-[500px] rounded-full bg-[#dcefe4] blur-3xl" />
@@ -243,10 +263,13 @@ export default function Home() {
             <div><h1 className="text-2xl font-bold tracking-tight sm:text-3xl">RAG Chat</h1><p className="text-xs text-[#75877f]">PDF question assistant</p></div>
           </div>
           <div className="flex items-center gap-2">
-            <span className={`flex items-center gap-2 rounded-full border px-3 py-2 text-xs ${backendReady ? "border-[#bedfc9] bg-[#e5f4ea] text-[#326348]" : "border-[#efc5bc] bg-[#fff0ec] text-[#a34e40]"}`}>
-              <span className={`h-2 w-2 rounded-full ${backendReady ? "bg-[#4a9b67]" : "bg-[#d36b58]"}`} />
-              {checkingBackend ? "Connecting..." : backendReady ? "Connected" : "Offline"}
-            </span>
+            <div role="status" aria-live="polite" aria-atomic="true">
+              {!checkingBackend && !backendReady ? (
+                <button type="button" title="Reconnect to the PDF service" aria-label="Backend offline. Reconnect to the PDF service" disabled={busy} onClick={() => void reloadWorkspace()} className={`${connectionClass} cursor-default transition-colors duration-200 enabled:hover:bg-[#ffe5dc] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#a34e40] motion-reduce:transition-none disabled:opacity-50`}>
+                  {connectionContent}
+                </button>
+              ) : <div className={connectionClass}>{connectionContent}</div>}
+            </div>
             {!user && <button type="button" disabled={busy} onClick={() => showAuth("login")} className="cursor-default rounded-xl bg-[#315e50] px-4 py-2 text-sm font-medium text-white transition-[transform,background-color,box-shadow] duration-200 ease-out motion-safe:enabled:hover:-translate-y-0.5 motion-safe:enabled:hover:scale-[1.02] enabled:hover:bg-[#254c40] enabled:hover:shadow-[0_8px_20px_rgba(49,94,80,0.2)] motion-safe:enabled:active:translate-y-0 motion-safe:enabled:active:scale-[0.98] enabled:active:bg-[#203f34] enabled:active:shadow-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#315e50] motion-reduce:transition-none disabled:opacity-50">Log in</button>}
           </div>
         </header>
@@ -309,6 +332,7 @@ export default function Home() {
                   type="button"
                   title="Upload a PDF"
                   aria-label="Upload a PDF"
+                  data-upload-button
                   disabled={busy || !backendReady}
                   onClick={() => fileInputRef.current?.click()}
                   className="group flex h-12 w-12 shrink-0 cursor-default items-center justify-center rounded-2xl bg-[#f5d8c8] text-[#a85640] transition-[transform,background-color,box-shadow] duration-200 ease-out motion-safe:enabled:hover:-translate-y-0.5 motion-safe:enabled:hover:scale-[1.04] enabled:hover:bg-[#efc5b2] enabled:hover:shadow-[0_6px_16px_rgba(168,86,64,0.18)] motion-safe:enabled:active:translate-y-0 motion-safe:enabled:active:scale-[0.96] enabled:active:bg-[#eab7a1] enabled:active:shadow-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#a85640] motion-reduce:transition-none disabled:opacity-40"
@@ -323,7 +347,7 @@ export default function Home() {
                       stroke="currentColor"
                       strokeWidth="2"
                       strokeLinecap="round"
-                      className={`transition-transform duration-300 ease-out motion-reduce:transition-none ${!busy && backendReady ? "motion-safe:group-hover:rotate-90" : ""}`}
+                      data-upload-plus
                     >
                       <path d="M12 5v14M5 12h14" />
                     </svg>
@@ -349,6 +373,37 @@ export default function Home() {
         </form>
         <p className="mt-5 text-center text-sm text-[#687c74]">{authMode === "signup" ? "Already have an account? " : "New here? "}<button type="button" disabled={authBusy} onClick={() => { setAuthMode(authMode === "signup" ? "login" : "signup"); setAuthError(""); setPassword(""); }} className="font-semibold text-[#315e50] underline">{authMode === "signup" ? "Log in" : "Create account"}</button></p>
       </dialog>
+      <style jsx global>{`
+        .rag-book-icon { display: inline-flex; transform-origin: center; }
+        .rag-book-left, .rag-book-right { transform-origin: 12px 20px; transition: transform 280ms ease; }
+        .rag-status-pill:hover .rag-book-left { transform: rotate(-7deg); }
+        .rag-status-pill:hover .rag-book-right { transform: rotate(7deg); }
+        .rag-book-waking { animation: rag-book-wake 1.4s ease-in-out infinite; }
+        .rag-status-ready { box-shadow: 0 0 16px rgba(74, 155, 103, 0.12); }
+        .rag-ready-sparkle { animation: rag-book-sparkle 2.8s ease-in-out infinite; }
+        [data-upload-button]:enabled:hover [data-upload-plus],
+        [data-upload-button]:enabled:focus-visible [data-upload-plus] {
+          transform-box: fill-box; transform-origin: center;
+          animation: rag-upload-turn 1.3s linear infinite;
+        }
+        @keyframes rag-book-wake {
+          0%, 100% { transform: translateY(0) rotate(-3deg); }
+          50% { transform: translateY(-3px) rotate(3deg); }
+        }
+        @keyframes rag-book-sparkle {
+          0%, 100% { opacity: 0.5; transform: scale(0.9); }
+          50% { opacity: 1; transform: scale(1.1); }
+        }
+        @keyframes rag-upload-turn { to { transform: rotate(360deg); } }
+        @media (prefers-reduced-motion: reduce) {
+          .rag-book-waking, .rag-ready-sparkle,
+          [data-upload-button]:enabled:hover [data-upload-plus],
+          [data-upload-button]:enabled:focus-visible [data-upload-plus] { animation: none; }
+          .rag-book-left, .rag-book-right { transition: none; }
+          .rag-status-pill:hover .rag-book-left,
+          .rag-status-pill:hover .rag-book-right { transform: none; }
+        }
+      `}</style>
     </main>
   );
 }
