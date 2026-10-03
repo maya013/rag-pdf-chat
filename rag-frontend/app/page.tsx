@@ -1,4 +1,5 @@
 "use client";
+import { apiFetch as fetch } from "@/lib/api-client";
 
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
@@ -50,27 +51,42 @@ export default function Home() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  useEffect(() => {
-    async function checkBackend() {
-      try {
-        const response = await fetch(`${API_URL}/`);
+ useEffect(() => {
+  let cancelled = false;
 
-        if (!response.ok) {
-          throw new Error("Backend check failed.");
-        }
+  async function checkBackend() {
+    try {
+      const response = await fetch(`${API_URL}/`);
 
-        await response.json();
+      if (!response.ok) {
+        throw new Error("Backend check failed.");
+      }
+
+      const data = await response.json();
+
+      if (!cancelled) {
         setBackendReady(true);
-      } catch (requestError) {
-        console.error(requestError);
+        setMessages(data.messages ?? []);
+      }
+    } catch (requestError) {
+      console.error(requestError);
+
+      if (!cancelled) {
         setBackendReady(false);
-      } finally {
+      }
+    } finally {
+      if (!cancelled) {
         setCheckingBackend(false);
       }
     }
+  }
 
-    void checkBackend();
-  }, []);
+  void checkBackend();
+
+  return () => {
+    cancelled = true;
+  };
+}, []);
 
   async function uploadPdf(file: File) {
     if (uploading) {
